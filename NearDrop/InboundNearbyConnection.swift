@@ -13,6 +13,7 @@ import System
 
 import SwiftECC
 import BigInt
+import AppKit
 
 class InboundNearbyConnection: NearbyConnection{
 	
@@ -254,36 +255,57 @@ class InboundNearbyConnection: NearbyConnection{
 		currentState = .receivedPairedKeyResult
 	}
 	
-	private func processIntroductionFrame(_ frame:Sharing_Nearby_Frame) throws{
-		guard frame.hasV1, frame.v1.hasIntroduction else { throw NearbyError.requiredFieldMissing }
-		currentState = .waitingForUserConsent
-		let downloadsDirectory=(try FileManager.default.url(for: .downloadsDirectory, in: .userDomainMask, appropriateFor: nil, create: true)).resolvingSymlinksInPath()
-		for file in frame.v1.introduction.fileMetadata{
-			var dest=downloadsDirectory.appendingPathComponent(file.name)
-			if FileManager.default.fileExists(atPath: dest.path){
-				var counter=1
-				var path:String
-				let ext=dest.pathExtension
-				let baseUrl=dest.deletingPathExtension()
-				repeat{
-					path="\(baseUrl.path) (\(counter))"
-					if !ext.isEmpty{
-						path+=".\(ext)"
-					}
-					counter+=1
-				}while FileManager.default.fileExists(atPath: path)
-				dest=URL(fileURLWithPath: path)
-			}
-			let info=InternalFileInfo(meta: FileMetadata(name: file.name, size: file.size, mimeType: file.mimeType),
-									  payloadID: file.payloadID,
-									  destinationURL: dest)
-			transferredFiles[file.payloadID]=info
-		}
-		let metadata=TransferMetadata(files: transferredFiles.map({$0.value.meta}))
-		DispatchQueue.main.async {
-			self.delegate?.obtainUserConsent(for: metadata, from: self.remoteDeviceInfo!, connection: self)
-		}
-	}
+    private func processIntroductionFrame(_ frame:Sharing_Nearby_Frame) throws{
+        guard frame.hasV1, frame.v1.hasIntroduction else { throw NearbyError.requiredFieldMissing }
+        currentState = .waitingForUserConsent
+        let downloadsDirectory=(try FileManager.default.url(for: .downloadsDirectory, in: .userDomainMask, appropriateFor: nil, create: true)).resolvingSymlinksInPath()
+        let metadata: TransferMetadata
+        if let textMetadata = frame.v1.introduction.textMetadata.first {
+            metadata = .text(textMetadata)
+        } else {
+            for file in frame.v1.introduction.fileMetadata{
+                var dest=downloadsDirectory.appendingPathComponent(file.name)
+                if FileManager.default.fileExists(atPath: dest.path){
+                    var counter=1
+                    var path:String
+                    let ext=dest.pathExtension
+                    let baseUrl=dest.deletingPathExtension()
+                    repeat{
+                        path="\(baseUrl.path) (\(counter))"
+                        if !ext.isEmpty{
+                            path+=".\(ext)"
+                        }
+                        counter+=1
+                    }while FileManager.default.fileExists(atPath: path)
+                    dest=URL(fileURLWithPath: path)
+                }
+                let info=InternalFileInfo(meta: FileMetadata(name: file.name, size: file.size, mimeType: file.mimeType),
+                                          payloadID: file.payloadID,
+                                          destinationURL: dest)
+                transferredFiles[file.payloadID]=info
+            }
+            metadata = .files(transferredFiles.map({$0.value.meta}))
+        }
+        if case .text = metadata, Preferences.copyToClipboardWithoutConsent{
+            self.acceptTransfer()
+        } else if case .files = metadata, Preferences.copyToClipboardWithoutConsent{
+            self.acceptTransfer()
+            if let lastElement = transferredFiles.sorted(by: { $0.key < $1.key }).last {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(lastElement.value.destinationURL.absoluteString, forType: .string)
+                if Preferences.openFilesInFinder {
+//                    DownloadsFolderManager.shared.checkDownloadFolderPermission()
+                    DispatchQueue.main.async {
+                        DownloadsFolderManager.shared.openDownloadsFolderPanel()
+                    }
+                }
+            }
+        } else {
+            DispatchQueue.main.async {
+                self.delegate?.obtainUserConsent(for: metadata, from: self.remoteDeviceInfo!, connection: self)
+            }
+        }
+    }
 	
 	func submitUserConsent(accepted:Bool){
 		DispatchQueue.global(qos: .utility).async {
